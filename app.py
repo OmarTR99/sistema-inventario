@@ -2,97 +2,81 @@ import streamlit as st
 import pandas as pd
 from streamlit_gsheets import GSheetsConnection
 
-# 1. Diseño de la página principal
-st.set_page_config(page_title="Inventario Agronómico", page_icon="🌱")
-st.title("🌱 Sistema de Inventario Agronómico")
-st.write("Gestión de entradas, salidas y existencias.")
+st.set_page_config(page_title="Gestión TAL-IVAN", page_icon="🚜", layout="wide")
+st.title("🚜 Sistema Integral Agro: Inventario y Deudas")
 
-# 2. Conexión a Google Sheets
+# Conexión a las dos pestañas
 conn = st.connection("gsheets", type=GSheetsConnection)
-df = conn.read(worksheet="Inventario", ttl=0)
+df_inv = conn.read(worksheet="Inventario", ttl=0).dropna(how="all")
+df_deudas = conn.read(worksheet="Registro_Deudas", ttl=0).dropna(how="all")
 
-# Limpiar filas vacías
-df = df.dropna(how="all")
-
-# 3. Menú lateral
-st.sidebar.title("Menú de Opciones")
-menu = ["Ver Inventario y Alertas", "Registrar Movimiento", "Agregar Producto Nuevo"]
-eleccion = st.sidebar.radio("¿Qué deseas hacer?", menu)
+# Menú Lateral
+menu = ["Inventario y Finanzas", "Cuentas por Cobrar (Clientes)", "Cuentas por Pagar (Proveedores)", "Registrar Nueva Deuda"]
+choice = st.sidebar.radio("Navegación", menu)
 
 st.write("---")
 
-# ---------------- SECCIÓN 1: VER INVENTARIO ----------------
-if eleccion == "Ver Inventario y Alertas":
-    st.subheader("📦 Estado Actual del Inventario")
-    
-    if not df.empty:
-        df['Cantidad'] = pd.to_numeric(df['Cantidad'])
-        df['Stock_Minimo'] = pd.to_numeric(df['Stock_Minimo'])
-        
-        bajos_stock = df[df['Cantidad'] <= df['Stock_Minimo']]
-        
-        if not bajos_stock.empty:
-            st.error("⚠️ ALERTA: Los siguientes productos han alcanzado su límite mínimo:")
-            st.dataframe(bajos_stock[['Nombre', 'Cantidad', 'Stock_Minimo']], use_container_width=True)
-        else:
-            st.success("✅ Todo el inventario cuenta con existencias suficientes.")
-        
-        st.write("**Todos los productos disponibles:**")
-        st.dataframe(df, use_container_width=True)
-    else:
-        st.info("El inventario está vacío. Ve a 'Agregar Producto Nuevo' para empezar.")
+# ---------------- SECCIÓN 1: INVENTARIO (Lo que ya teníamos) ----------------
+if choice == "Inventario y Finanzas":
+    st.subheader("📦 Estado de Almacén")
+    st.dataframe(df_inv, use_container_width=True)
 
-# ---------------- SECCIÓN 2: REGISTRAR MOVIMIENTO ----------------
-elif eleccion == "Registrar Movimiento":
-    st.subheader("🔄 Entrada y Salida de Mercancía")
+# ---------------- SECCIÓN 2: CLIENTES QUE ME DEBEN ----------------
+elif choice == "Cuentas por Cobrar (Clientes)":
+    st.subheader("👤 Clientes con Pagos Pendientes")
+    # Filtrar solo Clientes
+    clientes = df_deudas[df_deudas['Tipo'] == "Cliente"]
     
-    if not df.empty:
-        producto_seleccionado = st.selectbox("1. Selecciona el producto:", df['Nombre'].tolist())
-        tipo_movimiento = st.radio("2. Tipo de movimiento:", ("Entrada (Suma)", "Salida (Resta)"))
-        cantidad_mov = st.number_input("3. Cantidad:", min_value=1, step=1)
+    if not clientes.empty:
+        total_cobrar = pd.to_numeric(clientes['Monto']).sum()
+        st.metric("Total por Cobrar", f"${total_cobrar:,.2f}")
         
-        if st.button("Registrar Movimiento"):
-            idx = df.index[df['Nombre'] == producto_seleccionado].tolist()[0]
-            stock_actual = int(df.at[idx, 'Cantidad'])
-            
-            if "Entrada" in tipo_movimiento:
-                nuevo_stock = stock_actual + cantidad_mov
-            else:
-                nuevo_stock = stock_actual - cantidad_mov
-            
-            if nuevo_stock < 0:
-                st.error("❌ Error: No puedes sacar más mercancía de la que hay.")
-            else:
-                df.at[idx, 'Cantidad'] = nuevo_stock
-                conn.update(worksheet="Inventario", data=df)
-                st.success(f"✅ Movimiento registrado. El nuevo stock de **{producto_seleccionado}** es: {nuevo_stock}")
-                st.rerun()
+        # Selector para ver detalles de un cliente específico
+        lista_clientes = clientes['Nombre'].unique()
+        cliente_sel = st.selectbox("Selecciona un cliente para ver qué productos debe:", lista_clientes)
+        
+        detalles = clientes[clientes['Nombre'] == cliente_sel]
+        st.write(f"### Productos que debe {cliente_sel}:")
+        st.table(detalles[['Producto', 'Cantidad', 'Monto']])
     else:
-        st.warning("Primero debes agregar productos.")
+        st.info("No hay deudas de clientes registradas.")
 
-# ---------------- SECCIÓN 3: AGREGAR PRODUCTO ----------------
-elif eleccion == "Agregar Producto Nuevo":
-    st.subheader("➕ Añadir Nuevo Producto")
+# ---------------- SECCIÓN 3: PROVEEDORES A QUIENES DEBO ----------------
+elif choice == "Cuentas por Pagar (Proveedores)":
+    st.subheader("🤝 Deudas con Proveedores")
+    # Filtrar solo Proveedores
+    proveedores = df_deudas[df_deudas['Tipo'] == "Proveedor"]
     
-    nombre = st.text_input("Nombre del producto (ej. Fertilizante Urea):")
-    categoria = st.selectbox("Categoría:", ["Agroquímico", "Semilla", "Fertilizante", "Herramienta", "Otro"])
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        cantidad_inicial = st.number_input("Cantidad inicial en almacén:", min_value=0, step=1)
-    with col2:
-        stock_minimo = st.number_input("¿En qué cantidad debe dispararse la alerta?:", min_value=0, step=1)
-    
-    if st.button("Guardar Producto Nuevo"):
-        if nombre != "":
-            nuevo_producto = pd.DataFrame({
-                "Nombre": [nombre],
-                "Categoria": [categoria],
-                "Cantidad": [cantidad_inicial],
-                "Stock_Minimo": [stock_minimo]
+    if not proveedores.empty:
+        total_pagar = pd.to_numeric(proveedores['Monto']).sum()
+        st.error(f"Total Pendiente de Pago: ${total_pagar:,.2f}")
+        
+        lista_prov = proveedores['Nombre'].unique()
+        prov_sel = st.selectbox("Selecciona un proveedor para ver qué mercancía le debes:", lista_prov)
+        
+        detalles_p = proveedores[proveedores['Nombre'] == prov_sel]
+        st.write(f"### Mercancía pendiente con {prov_sel}:")
+        st.table(detalles_p[['Producto', 'Cantidad', 'Monto']])
+    else:
+        st.success("Estás al día con tus proveedores.")
+
+# ---------------- SECCIÓN 4: REGISTRAR NUEVA DEUDA ----------------
+elif choice == "Registrar Nueva Deuda":
+    st.subheader("📝 Registrar nueva cuenta pendiente")
+    with st.form("form_deuda"):
+        tipo = st.selectbox("¿Es un Cliente o un Proveedor?", ["Cliente", "Proveedor"])
+        nombre = st.text_input("Nombre de la persona/empresa:")
+        # Podemos elegir del inventario qué producto está involucrado
+        producto = st.selectbox("Producto involucrado:", df_inv['Nombre'].tolist() if not df_inv.empty else ["No hay productos"])
+        col1, col2 = st.columns(2)
+        cant = col1.number_input("Cantidad de producto:", min_value=1)
+        monto = col2.number_input("Monto total de la deuda ($):", min_value=0.0)
+        
+        if st.form_submit_button("Guardar Deuda"):
+            nueva_deuda = pd.DataFrame({
+                "Tipo": [tipo], "Nombre": [nombre], "Producto": [producto],
+                "Cantidad": [cant], "Monto": [monto]
             })
-            df_actualizado = pd.concat([df, nuevo_producto], ignore_index=True)
-            conn.update(worksheet="Inventario", data=df_actualizado)
-            st.success(f"✅ Producto '{nombre}' agregado exitosamente.")
-        else:
-            st.error("Por favor, escribe el nombre del producto.")
+            df_final_deudas = pd.concat([df_deudas, nueva_deuda], ignore_index=True)
+            conn.update(worksheet="Registro_Deudas", data=df_final_deudas)
+            st.success("Deuda registrada exitosamente.")
