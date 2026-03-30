@@ -10,13 +10,13 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 df_inv = conn.read(worksheet="Inventario", ttl=0).dropna(how="all")
 df_deudas = conn.read(worksheet="Registro_Deudas", ttl=0).dropna(how="all")
 
-# Convertir columnas a números para evitar errores
+# Convertir columnas a números
 cols_num = ['Cantidad', 'Stock_Minimo', 'Costo_Compra', 'Precio_Venta', 'Ganancia_Unitaria', 'Ganancia_Total']
 for col in cols_num:
     if col in df_inv.columns:
         df_inv[col] = pd.to_numeric(df_inv[col], errors='coerce').fillna(0)
 
-# Menú Lateral Unificado
+# Menú Lateral
 st.sidebar.title("Menú Principal")
 menu = [
     "Resumen de Inventario", 
@@ -48,7 +48,7 @@ if choice == "Resumen de Inventario":
 
 # ---------------- 2. ENTRADAS Y SALIDAS ----------------
 elif choice == "Entradas y Salidas":
-    st.subheader("🔄 Registrar Movimiento de Mercancía")
+    st.subheader("🔄 Registrar Movimiento (Contado)")
     if not df_inv.empty:
         prod = st.selectbox("Producto:", df_inv['Nombre'].tolist())
         tipo = st.radio("Acción:", ("Entrada", "Salida (Venta)"))
@@ -79,7 +79,6 @@ elif choice == "Registrar Producto Nuevo":
         cant_i = c1.number_input("Stock Inicial:", min_value=0)
         s_min = c2.number_input("Mínimo para Alerta:", min_value=1)
         
-        # Aquí es donde se interactúa con el dinero
         c3, c4 = st.columns(2)
         costo = c3.number_input("Costo Unitario de Compra ($):", min_value=0.0, format="%.2f")
         venta = c4.number_input("Precio Unitario de Venta ($):", min_value=0.0, format="%.2f")
@@ -120,20 +119,48 @@ elif choice == "Cuentas por Pagar (Proveedores)":
     else:
         st.success("Estás al día con tus proveedores.")
 
-# ---------------- 6. NUEVA DEUDA ----------------
+# ---------------- 6. NUEVA DEUDA E INVENTARIO ----------------
 elif choice == "Registrar Nueva Deuda":
-    st.subheader("📝 Registrar nueva cuenta pendiente")
-    with st.form("form_deuda"):
+    st.subheader("📝 Registrar deuda y actualizar inventario")
+    
+    if not df_inv.empty:
         tipo = st.selectbox("¿Es un Cliente o un Proveedor?", ["Cliente", "Proveedor"])
         nombre = st.text_input("Nombre de la persona/empresa:")
-        producto = st.selectbox("Producto involucrado:", df_inv['Nombre'].tolist() if not df_inv.empty else ["No hay productos"])
-        c1, c2 = st.columns(2)
-        cant = c1.number_input("Cantidad:", min_value=1)
-        monto = c2.number_input("Monto total ($):", min_value=0.0)
+        producto_seleccionado = st.selectbox("Producto involucrado:", df_inv['Nombre'].tolist())
         
-        if st.form_submit_button("Guardar Deuda"):
+        # Obtener los datos actuales del producto desde el Excel
+        idx = df_inv.index[df_inv['Nombre'] == producto_seleccionado].tolist()[0]
+        precio_venta = df_inv.at[idx, 'Precio_Venta']
+        costo_compra = df_inv.at[idx, 'Costo_Compra']
+        stock_actual = df_inv.at[idx, 'Cantidad']
+        ganancia_uni = df_inv.at[idx, 'Ganancia_Unitaria']
+        
+        # Decidir qué precio usar según a quién le registramos la deuda
+        precio_usar = precio_venta if tipo == "Cliente" else costo_compra
+        
+        cant = st.number_input("Cantidad de producto:", min_value=1, step=1)
+        
+        # El sistema multiplica solo
+        monto_calculado = cant * precio_usar
+        st.info(f"💰 Monto total de la deuda: **${monto_calculado:,.2f}** (Calculado a ${precio_usar:,.2f} c/u)")
+        
+        if st.button("Guardar Deuda y Actualizar Stock"):
             if nombre:
-                nueva_deuda = pd.DataFrame({"Tipo": [tipo], "Nombre": [nombre], "Producto": [producto], "Cantidad": [cant], "Monto": [monto]})
-                df_final_deudas = pd.concat([df_deudas, nueva_deuda], ignore_index=True)
-                conn.update(worksheet="Registro_Deudas", data=df_final_deudas)
-                st.success("Deuda registrada exitosamente.")
+                # Validar que tengamos stock si es un cliente llevándose mercancía
+                if tipo == "Cliente" and stock_actual < cant:
+                    st.error(f"❌ Error: No puedes fiar {cant} unidades. Solo tienes {stock_actual} de {producto_seleccionado} en almacén.")
+                else:
+                    # 1. Guardar la deuda en la hoja de deudas
+                    nueva_deuda = pd.DataFrame({"Tipo": [tipo], "Nombre": [nombre], "Producto": [producto_seleccionado], "Cantidad": [cant], "Monto": [monto_calculado]})
+                    df_final_deudas = pd.concat([df_deudas, nueva_deuda], ignore_index=True)
+                    conn.update(worksheet="Registro_Deudas", data=df_final_deudas)
+                    
+                    # 2. Actualizar el stock en la hoja de inventario
+                    nuevo_stock = stock_actual - cant if tipo == "Cliente" else stock_actual + cant
+                    df_inv.at[idx, 'Cantidad'] = nuevo_stock
+                    df_inv.at[idx, 'Ganancia_Total'] = nuevo_stock * ganancia_uni
+                    conn.update(worksheet="Inventario", data=df_inv)
+                    
+                    st.success(f"✅ Listo. Deuda guardada y stock de {producto_seleccionado} actualizado a {nuevo_stock}.")
+    else:
+        st.warning("Primero debes agregar productos al inventario.")
